@@ -10,22 +10,27 @@ import json
 import numpy as np
 from pathlib import Path
 
-# parametros globais
-GRID_SIZE = 50
+# PARÂMETROS GLOBAIS
 
-# baseline
-#cenario A: 
+GRID_SIZE = 50  # Grade padrão para os cenários reais: 50 × 50
+
+
+# BASELINES — VALORES REAIS POR REGIÃO
+
+# Cenário A: quatro sub-regiões do MATOPIBA
+# Cada sub-região ocupa um quadrante da grade 50×50
 MATOPIBA_BASELINES = {
-    # ndvi - precip_mm - prob_seca - idh
+    #           ndvi   precip_mm  prob_seca  idh
     "maranhao":  (0.48,   1350,      0.28,    0.639),
     "tocantins": (0.42,   1200,      0.35,    0.699),
     "piaui":     (0.35,    850,      0.52,    0.646),
     "bahia":     (0.38,    950,      0.45,    0.660),
 }
 
-#cenario C:
+# Cenário C: estados do arco do desmatamento amazônico
+# Ordenados por fração de desmatamento decrescente
 AMAZONIA_BASELINES = {
-    # frac_desmat - prob_alerta - frac_fluvial
+    #                frac_desmat  prob_alerta  frac_fluvial
     "para":          (0.40,         0.68,        0.35),
     "amazonas":      (0.20,         0.45,        0.58),
     "mato_grosso":   (0.15,         0.52,        0.12),
@@ -33,24 +38,24 @@ AMAZONIA_BASELINES = {
     "outros":        (0.13,         0.30,        0.20),
 }
 
-#fracao esperada de celulas blockeadas no cenario C
+# Fração esperada de células bloqueadas no Cenário C
+# Calculada como média ponderada: sum(frac_desmat × frac_fluvial)
 AMAZONIA_BLOCKED_FRACTION = sum(
     fd * ff for fd, _, ff in AMAZONIA_BASELINES.values()
-)
+)  # ≈ 0.34 — ~34% das células com acesso fluvial exclusivo
 
 
-#Funcoes auxiliares
+# FUNÇÕES AUXILIARES
 
 def _spatial_noise(ni: int, nj: int, amplitude: float, rng: np.random.Generator) -> np.ndarray:
     """
-    Gera ruido espacial suave
-    simula a variacao continua de condicoes climaticas no espaco geografico
+    Gera ruído espacial suave (gradiente senoidal + perturbação gaussiana).
+    Simula a variação contínua de condições climáticas no espaço geográfico.
     """
-    
     xx, yy = np.meshgrid(np.linspace(0, np.pi, nj), np.linspace(0, np.pi, ni))
     senoidal = np.sin(xx) * np.cos(yy)
-    guassiano = rng.normal(0, 0.3, size=(ni, nj))
-    noise = amplitude * (0.6 * senoidal + 0.4 * guassiano)
+    gaussiano = rng.normal(0, 0.3, size=(ni, nj))
+    noise = amplitude * (0.6 * senoidal + 0.4 * gaussiano)
     return noise
 
 
@@ -65,7 +70,7 @@ def _beta_params(mean: float, concentration: float = 8.0) -> tuple[float, float]
     return mean * concentration, (1 - mean) * concentration
 
 
-# CENÁRIO A — MATOPIBA (SECA NO CERRADO/NORDESTE)
+# MATOPIBA (SECA NO CERRADO/NORDESTE)
 
 def generate_grid_matopiba(n: int = GRID_SIZE, m: int = GRID_SIZE, seed: int = 42) -> dict:
     """
@@ -195,6 +200,19 @@ def generate_grid_amazonia(n: int = GRID_SIZE, m: int = GRID_SIZE, seed: int = 4
     cost[0, 0]             = max(float(cost[0, 0]), 1.0)
     cost[n - 1, m - 1]    = max(float(cost[n - 1, m - 1]), 1.0)
 
+    # Garante corredor diagonal de acesso (simula rodovia principal — BR-163/BR-230)
+    # Sem isso, o alto índice de bloqueio (~33%) pode tornar a grade intransponível.
+    # rota terrestre principal. O corredor tem largura 2 para maior realismo.
+    for step in range(min(n, m)):
+        i_c = int(step * (n - 1) / (min(n, m) - 1)) if min(n, m) > 1 else 0
+        j_c = int(step * (m - 1) / (min(n, m) - 1)) if min(n, m) > 1 else 0
+        i_c = min(i_c, n - 1)
+        j_c = min(j_c, m - 1)
+        for ii, jj in [(i_c, j_c), (i_c, min(j_c + 1, m - 1))]:
+            blocked[ii, jj] = False
+            if cost[ii, jj] == -1.0:
+                cost[ii, jj] = 8.0   # custo alto — logística fluvial adaptada
+
     cost_int      = np.where(blocked, -1, np.round(cost).astype(int))
     blocked_count = int(blocked.sum())
 
@@ -242,6 +260,13 @@ def generate_small_grid(n: int, m: int, cenario: str = "A", seed: int = 0) -> di
 def save_grids(output_dir: str = None) -> None:
     """
     Gera as grades dos dois cenários e salva em data/processed/.
+
+    Arquivos gerados por cenário:
+        cenario_X_50x50_risk.npy    — r[i][j]: índice de risco
+        cenario_X_50x50_cost.npy    — c[i][j]: custo de atendimento
+        cenario_X_50x50_prob.npy    — p[i][j]: probabilidade histórica
+        cenario_X_50x50_blocked.npy — máscara booleana de células bloqueadas
+        cenario_X_50x50_meta.json   — metadados e fontes de dados
     """
     if output_dir is None:
         output_dir = Path(__file__).parent.parent / "data" / "processed"
